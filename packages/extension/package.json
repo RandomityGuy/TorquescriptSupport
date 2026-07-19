@@ -1,11 +1,19 @@
 {
-    "name": "vscode-torquescript.lang",
+    "name": "torquescript-support",
     "description": "Language support for TorqueScript (Torque 3D / Torque Game Engine): syntax highlighting, go to definition, find references, signature help, workspace/document symbols, hover, completion, and JSDoc-style type hints.",
     "version": "0.0.1",
-    "displayName": "TorqueScript",
+    "displayName": "TorqueScript Support",
     "publisher": "RandomityGuy",
     "license": "MIT",
     "icon": "images/torque.png",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/RandomityGuy/TorquescriptSupport"
+    },
+    "bugs": {
+        "url": "https://github.com/RandomityGuy/TorquescriptSupport/issues"
+    },
+    "homepage": "https://github.com/RandomityGuy/TorquescriptSupport",
     "type": "module",
     "engines": {
         "vscode": "^1.67.0"
@@ -21,17 +29,28 @@
         "tgea"
     ],
     "contributes": {
-        "languages": [{
-            "id": "torquescript",
-            "aliases": ["torquescript", "torquescript"],
-            "extensions": [".cs", ".tscript", ".gui"],
-            "configuration": "./language-configuration.json"
-        }],
-        "grammars": [{
-            "language": "torquescript",
-            "scopeName": "source.torquescript",
-            "path": "syntaxes/torquescript.tmLanguage.json"
-        }]
+        "languages": [
+            {
+                "id": "torquescript",
+                "aliases": [
+                    "torquescript",
+                    "torquescript"
+                ],
+                "extensions": [
+                    ".cs",
+                    ".tscript",
+                    ".gui"
+                ],
+                "configuration": "./language-configuration.json"
+            }
+        ],
+        "grammars": [
+            {
+                "language": "torquescript",
+                "scopeName": "source.torquescript",
+                "path": "syntaxes/torquescript.tmLanguage.json"
+            }
+        ]
     },
     "activationEvents": [
         "onLanguage:torquescript"
@@ -58,6 +77,6 @@
         "esbuild": "~0.25.5"
     },
     "vsce": {
-      "dependencies": false
+        "dependencies": false
     }
 }
