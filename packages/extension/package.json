@@ -1,0 +1,63 @@
+{
+    "name": "vscode-torquescript.lang",
+    "description": "Language support for TorqueScript (Torque 3D / Torque Game Engine): syntax highlighting, go to definition, find references, signature help, workspace/document symbols, hover, completion, and JSDoc-style type hints.",
+    "version": "0.0.1",
+    "displayName": "TorqueScript",
+    "publisher": "RandomityGuy",
+    "license": "MIT",
+    "icon": "images/torque.png",
+    "type": "module",
+    "engines": {
+        "vscode": "^1.67.0"
+    },
+    "categories": [
+        "Programming Languages"
+    ],
+    "keywords": [
+        "torquescript",
+        "torque3d",
+        "torque",
+        "tge",
+        "tgea"
+    ],
+    "contributes": {
+        "languages": [{
+            "id": "torquescript",
+            "aliases": ["torquescript", "torquescript"],
+            "extensions": [".cs", ".tscript", ".gui"],
+            "configuration": "./language-configuration.json"
+        }],
+        "grammars": [{
+            "language": "torquescript",
+            "scopeName": "source.torquescript",
+            "path": "syntaxes/torquescript.tmLanguage.json"
+        }]
+    },
+    "activationEvents": [
+        "onLanguage:torquescript"
+    ],
+    "main": "./out/extension/main.cjs",
+    "scripts": {
+        "clean": "shx rm -fr *.tsbuildinfo out syntaxes",
+        "vscode:prepublish": "npm run build",
+        "build:prepare": "shx mkdir -p ./syntaxes/ && shx cp -f ../language/syntaxes/torquescript.tmLanguage.json ./syntaxes/torquescript.tmLanguage.json",
+        "build": "npm run build:prepare && tsc -b tsconfig.json && node esbuild.mjs",
+        "build:clean": "npm run clean && npm run build",
+        "watch": "npm run build:prepare && concurrently -n tsc,esbuild -c blue,yellow \"tsc -b tsconfig.json --watch\" \"node esbuild.mjs --watch\"",
+        "package": "npm run build && vsce package"
+    },
+    "dependencies": {
+        "torquescript-language": "0.0.1",
+        "vscode-languageclient": "~9.0.1",
+        "vscode-languageserver": "~9.0.1"
+    },
+    "devDependencies": {
+        "@types/vscode": "~1.67.0",
+        "@vscode/vsce": "~3.6.0",
+        "concurrently": "~8.2.1",
+        "esbuild": "~0.25.5"
+    },
+    "vsce": {
+      "dependencies": false
+    }
+}

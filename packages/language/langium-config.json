@@ -1,0 +1,15 @@
+{
+    "projectName": "Torquescript",
+    "languages": [
+        {
+            "id": "torquescript",
+            "grammar": "src/torquescript.langium",
+            "fileExtensions": [
+                "cs",
+                "tscript",
+                "gui"
+            ]
+        }
+    ],
+    "out": "src/generated"
+}
