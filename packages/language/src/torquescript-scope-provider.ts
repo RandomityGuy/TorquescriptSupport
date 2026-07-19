@@ -141,14 +141,26 @@ export class TorquescriptScopeProvider extends DefaultScopeProvider {
         const descriptions: AstNodeDescription[] = [];
         const namespaceNames = new Set(inferred.extraNamespaces.map(n => n.toLowerCase()));
         const seen = new Set<ConsoleClassDecl>();
-        let current = inferred.classDecl;
-        while (current && !seen.has(current)) {
-            seen.add(current);
-            namespaceNames.add(current.name.toLowerCase());
-            for (const member of (kind === 'field' ? current.fields : current.methods)) {
-                descriptions.push(this.descriptions.createDescription(member, member.name));
+        const collectFromHierarchy = (start: ConsoleClassDecl | undefined): void => {
+            let current = start;
+            while (current && !seen.has(current)) {
+                seen.add(current);
+                namespaceNames.add(current.name.toLowerCase());
+                for (const member of (kind === 'field' ? current.fields : current.methods)) {
+                    descriptions.push(this.descriptions.createDescription(member, member.name));
+                }
+                current = current.parentClass?.ref;
             }
-            current = current.parentClass?.ref;
+        };
+
+        collectFromHierarchy(inferred.classDecl);
+        // `class=`/`superClass=` are only ever processed by ScriptObject/ScriptGroup::onAdd() (see
+        // usesScriptObjectConvention's doc comment) - so an object using them gets ScriptObject's
+        // (and transitively SimObject's) real static fields/methods too, on top of whatever its
+        // own literal declared class already contributes. Silently does nothing if the workspace's
+        // console dump doesn't declare a "ScriptObject" class at all.
+        if (inferred.usesScriptObjectConvention) {
+            collectFromHierarchy(this.typeInference.findClassByName('ScriptObject'));
         }
 
         if (kind === 'method') {

@@ -263,8 +263,11 @@ terminal OP_CAT: 'NL' | 'TAB' | 'SPC' | '@';
 hidden terminal WS: /\s+/;
 terminal STRING: '"' (/[^"\\\r\n"]/ | EscapeSequence)* '"';
 terminal TAG: '\'' (/[^'\\\r\n"]/ | EscapeSequence)* '\'';
+// The exponent alternative must come before the plain-decimal one: regex alternation takes the
+// first alternative that matches (not the longest), so with the plain-decimal form first,
+// "1.5e-10" would match only "1.5" and leave "e-10" as leftover garbage tokens.
 terminal FLTCONST returns number:
-     (INTEGER '.' INTEGER) | (INTEGER ('.' INTEGER)? /[eE]/ /[+-]/? INTEGER) | ('.' INTEGER (/[eE]/ /[+-]/? INTEGER)?);
+     (INTEGER ('.' INTEGER)? /[eE]/ /[+-]/? INTEGER) | (INTEGER '.' INTEGER) | ('.' INTEGER (/[eE]/ /[+-]/? INTEGER)?);
 terminal VAR: /[$%]/ LETTER VARTAIL*;
 terminal IDENT: LETTER IDTAIL*;
 terminal INTCONST returns number: '0' /[xX]/ HEXDIGIT+ | INTEGER | 'true' | 'false';

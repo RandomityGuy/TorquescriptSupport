@@ -1,7 +1,7 @@
 import type { AstNode, IndexManager } from 'langium';
 import { AstUtils, WorkspaceCache } from 'langium';
 import type { CommentProvider } from 'langium';
-import { unwrapExpr } from './torquescript-expr-utils.js';
+import { getObjectBareword, unwrapExpr } from './torquescript-expr-utils.js';
 import type {
     ConsoleClassDecl, DatablockStmt, Expr, FnDecl, ObjectDecl, ObjectMember, VarExpr
 } from './generated/ast.js';
@@ -12,6 +12,15 @@ export interface InferredType {
     classDecl?: ConsoleClassDecl;
     /** Namespace names from a literal `class`/`superClass` field on the originating object - TorqueScript's own dynamic-namespace convention, checked one level deep. */
     extraNamespaces: string[];
+    /**
+     * True when `class=`/`superClass=` was actually used (and not bypassed - see
+     * `classNameLinkingBypassed`) - only `ScriptObject`/`ScriptGroup::onAdd()` ever process those
+     * fields, so using them at all implies the object behaves like a `ScriptObject` (and
+     * transitively `SimObject`) for field/method purposes too, regardless of its literal declared
+     * C++ class. Never set for datablocks - `GameBaseData::onAdd()` links `className` itself
+     * directly and never calls `ScriptObject::onAdd()`, so the same implication doesn't hold there.
+     */
+    usesScriptObjectConvention?: boolean;
     /** 'explicit' only for an unambiguous `@type` JSDoc override - the sole source confident enough to ever warn on. */
     source: 'explicit' | 'inferred';
 }
@@ -83,18 +92,65 @@ export class TorquescriptTypeInference {
         return undefined;
     }
 
+    /**
+     * `GuiControl` and `TCPObject` (and its subclasses, e.g. `HTTPObject`) override `onAdd()` to
+     * link their own real C++ class namespace straight to the object's name - unlike
+     * `ScriptObject`/`ScriptGroup::onAdd()` (what other objects fall back to), they never read
+     * `className`/`superClassName` at all. Setting `class=`/`superClass=` on one of these has no
+     * runtime effect, so both fields are skipped entirely for objects in that hierarchy - not
+     * just `superClass=` like the datablock case (see `inferFromDatablock`), where `className` is
+     * still honored.
+     */
+    private static readonly CLASSNAME_LINK_BYPASS_BASES = new Set(['guicontrol', 'tcpobject']);
+
+    private classNameLinkingBypassed(classDecl: ConsoleClassDecl | undefined): boolean {
+        let current = classDecl;
+        const seen = new Set<ConsoleClassDecl>();
+        while (current && !seen.has(current)) {
+            if (TorquescriptTypeInference.CLASSNAME_LINK_BYPASS_BASES.has(current.name.toLowerCase())) {
+                return true;
+            }
+            seen.add(current);
+            current = current.parentClass?.ref;
+        }
+        return false;
+    }
+
     private inferFromObjectDecl(decl: ObjectDecl): InferredType | undefined {
         const classDecl = decl.classname?.ref;
-        const extraNamespaces = this.getDynamicNamespaces(decl.members);
+        const extraNamespaces = this.classNameLinkingBypassed(classDecl) ? [] : this.getDynamicNamespaces(decl.members);
+        const usesScriptObjectConvention = extraNamespaces.length > 0;
+        // Every `onAdd()` variant - regardless of whether it honors class=/superClass= - ends by
+        // linking the object's own registered name in as the innermost namespace
+        // (`Con::linkNamespaces(parent, name); mNameSpace = Con::lookupNamespace(name);`). That's
+        // what makes per-dialog overrides like `function PlayMissionGui::onWake(%this){}` resolve
+        // on an object created as `new GuiControl(PlayMissionGui)` - universal across every class,
+        // so it's added unconditionally, not gated behind classNameLinkingBypassed.
+        const ownName = getObjectBareword(decl);
+        if (ownName) {
+            extraNamespaces.push(ownName);
+        }
         if (!classDecl && extraNamespaces.length === 0) {
             return undefined;
         }
-        return { classDecl, extraNamespaces, source: 'inferred' };
+        return { classDecl, extraNamespaces, usesScriptObjectConvention, source: 'inferred' };
     }
 
+    /**
+     * Datablocks (`GameBaseData`-derived classes) only ever link their namespace through
+     * `className` - the engine's `GameBaseData::onAdd()` never reads `mSuperClassName` at all
+     * (unlike `ScriptObject`/`ScriptGroup::onAdd()`, which plain `new`/`singleton` objects fall
+     * back to and which do honor both `className` and `superClassName`). Including `superClass=`
+     * here would resolve `.method()` calls through a namespace TorqueScript itself never links for
+     * a datablock.
+     */
     private inferFromDatablock(decl: DatablockStmt): InferredType | undefined {
         const classDecl = decl.classname?.ref;
-        const extraNamespaces = this.getDynamicNamespacesFromSlots(decl.slots);
+        const extraNamespaces = this.getDynamicNamespacesFromSlots(decl.slots, { includeSuperClass: false });
+        // Same universal name-link as inferFromObjectDecl - GameBaseData::onAdd() also ends with
+        // `Con::linkNamespaces(className, name); mNameSpace = Con::lookupNamespace(name);`, so a
+        // datablock's own name works as a namespace too (`function MyDataName::method(){}`).
+        extraNamespaces.push(decl.name);
         if (!classDecl && extraNamespaces.length === 0) {
             return undefined;
         }
@@ -102,10 +158,13 @@ export class TorquescriptTypeInference {
     }
 
     private getDynamicNamespaces(members: ObjectMember[]): string[] {
-        return this.getDynamicNamespacesFromSlots(members.filter(isSlotAssign));
+        return this.getDynamicNamespacesFromSlots(members.filter(isSlotAssign), { includeSuperClass: true });
     }
 
-    private getDynamicNamespacesFromSlots(slots: Array<{ slot?: { $refText: string }, value: Expr }>): string[] {
+    private getDynamicNamespacesFromSlots(
+        slots: Array<{ slot?: { $refText: string }, value: Expr }>,
+        options: { includeSuperClass: boolean }
+    ): string[] {
         const names: string[] = [];
         for (const slot of slots) {
             // `$refText` (raw source text), not `.ref.name` - `class`/`superClass` are dynamic
@@ -113,7 +172,7 @@ export class TorquescriptTypeInference {
             // resolves (that's expected, see the `slot` linking-error suppression), but the text
             // is always available regardless.
             const fieldName = slot.slot?.$refText?.toLowerCase();
-            if (fieldName === 'class' || fieldName === 'superclass') {
+            if (fieldName === 'class' || (options.includeSuperClass && fieldName === 'superclass')) {
                 const literal = this.readStringLiteral(slot.value);
                 if (literal) {
                     names.push(literal);
@@ -175,11 +234,16 @@ export class TorquescriptTypeInference {
     }
 
     private inferFromBareword(name: string): InferredType | undefined {
-        const node = this.getNamedObjectIndex().get(name.toLowerCase());
+        const node = this.findNamedObject(name);
         if (!node) {
             return undefined;
         }
         return isObjectDecl(node) ? this.inferFromObjectDecl(node) : this.inferFromDatablock(node);
+    }
+
+    /** The `ObjectDecl`/`DatablockStmt` registered under this name, if any - used for go-to-definition on bareword usages (`PlayMissionGui.onWake();`), which aren't a formal Langium cross-reference (see torquescript-definition-provider.ts). */
+    findNamedObject(name: string): NamedObjectNode | undefined {
+        return this.getNamedObjectIndex().get(name.toLowerCase());
     }
 
     private getNamedObjectIndex(): Map<string, NamedObjectNode> {
@@ -231,22 +295,43 @@ export class TorquescriptTypeInference {
     }
 
     /**
-     * `@type`/`@param`/`@returns` may name either a real engine class (from the console dump) or
-     * a purely dynamic ScriptObject-convention namespace that only exists as a string (e.g.
-     * `class = "MyNamespace";` plus a bunch of `function MyNamespace::foo(){}` overrides, with no
-     * real `ConsoleClassDecl` behind it at all). If it doesn't resolve to a real class, treat it
-     * as a namespace name directly - the same fallback the `class`/`superClass` dynamic-overlay
-     * detection already uses - rather than silently discarding the annotation.
+     * `@type`/`@param`/`@returns` may name a real engine class (from the console dump), a
+     * specific named object/datablock elsewhere in the project (e.g. `@type MPCoolEndGameDlg`
+     * naming a GUI dialog registered as `new GuiControl(MPCoolEndGameDlg) {...}` in a `.gui`
+     * file), or a purely dynamic ScriptObject-convention namespace that only exists as a string
+     * (`class = "MyNamespace";` plus `function MyNamespace::foo(){}` overrides, no backing
+     * declaration at all). Checked in that order: a real class always wins if the name happens to
+     * collide; otherwise, if a named object matches, its *actual* inferred type (real class
+     * hierarchy included, not just its own namespace) is what the annotation should mean - without
+     * this, `@type MPCoolEndGameDlg` would only ever check script-level `MPCoolEndGameDlg::...`
+     * overrides and completely miss built-in methods declared on the real class the dialog is an
+     * instance of. Falls back to a bare namespace name only when neither matches.
      */
-    private resolveTypeName(name: string): { classDecl?: ConsoleClassDecl; extraNamespaces: string[] } {
+    private resolveTypeName(name: string): { classDecl?: ConsoleClassDecl; extraNamespaces: string[]; usesScriptObjectConvention?: boolean } {
         const classDecl = this.findClassByName(name);
-        // Original casing preserved for display (e.g. the unresolved-method warning) - matching
-        // elsewhere is already case-insensitive at the point of comparison (getReceiverScope
-        // lowercases when building its namespace set), same as the class/superClass overlay path.
-        return classDecl ? { classDecl, extraNamespaces: [] } : { extraNamespaces: [name] };
+        if (classDecl) {
+            // Original casing preserved for display (e.g. the unresolved-method warning) -
+            // matching elsewhere is already case-insensitive at the point of comparison.
+            return { classDecl, extraNamespaces: [] };
+        }
+        const namedObject = this.findNamedObject(name);
+        if (namedObject) {
+            const objectType = isObjectDecl(namedObject)
+                ? this.inferFromObjectDecl(namedObject)
+                : this.inferFromDatablock(namedObject);
+            if (objectType) {
+                return {
+                    classDecl: objectType.classDecl,
+                    extraNamespaces: objectType.extraNamespaces,
+                    usesScriptObjectConvention: objectType.usesScriptObjectConvention
+                };
+            }
+        }
+        return { extraNamespaces: [name] };
     }
 
-    private findClassByName(name: string): ConsoleClassDecl | undefined {
+    /** Public for the ScopeProvider's `ScriptObject` fallback - see getReceiverScope. */
+    findClassByName(name: string): ConsoleClassDecl | undefined {
         return this.getClassIndex().get(name.toLowerCase());
     }
 
