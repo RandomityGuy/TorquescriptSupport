@@ -1,11 +1,16 @@
-import type { AstNode, AstNodeDescription, ReferenceInfo, Scope } from 'langium';
-import { DefaultScopeProvider, EMPTY_SCOPE, MultiMapScope, WorkspaceCache } from 'langium';
+import type { AstNode, AstNodeDescription, ReferenceInfo, Scope, URI } from 'langium';
+import { AstUtils, DefaultScopeProvider, EMPTY_SCOPE, MultiMapScope, WorkspaceCache } from 'langium';
 import type { ConsoleClassDecl, ConsoleFieldDecl, Expr, FnDecl, PrimaryExprSuffix } from './generated/ast.js';
 import { isDatablockStmt, isFnDecl, isObjectDecl, isSlotAssign } from './generated/ast.js';
 import { TorquescriptTypeInference } from './torquescript-type-inference.js';
 import type { TorquescriptServices } from './torquescript-module.js';
 
 const NAMESPACE_FUNCTIONS_CACHE_KEY = 'namespace-functions';
+
+/** `.mis` files are mission scripts - their functions/objects are never callable from outside the mission, though they can freely call anything declared elsewhere. */
+function isMisDocumentUri(uri: URI): boolean {
+    return uri.path.toLowerCase().endsWith('.mis');
+}
 
 /**
  * TorqueScript function and class names are case-insensitive (e.g. `pushback()` resolves the
@@ -22,11 +27,14 @@ export class TorquescriptScopeProvider extends DefaultScopeProvider {
      * `globalScopeCache`.
      */
     private readonly namespaceFunctionsCache: WorkspaceCache<string, Map<string, FnDecl[]>>;
+    /** Per-`.mis`-document overlay scopes (its own otherwise-invisible exports) - see getGlobalScope. */
+    private readonly misOwnScopeCache: WorkspaceCache<string, Scope>;
 
     constructor(services: TorquescriptServices) {
         super(services);
         this.typeInference = new TorquescriptTypeInference(services);
         this.namespaceFunctionsCache = new WorkspaceCache(services.shared);
+        this.misOwnScopeCache = new WorkspaceCache(services.shared);
     }
 
     private getNamespaceFunctionIndex(): Map<string, FnDecl[]> {
@@ -62,10 +70,37 @@ export class TorquescriptScopeProvider extends DefaultScopeProvider {
         return super.getScope(context);
     }
 
-    protected override getGlobalScope(referenceType: string, _context: ReferenceInfo): Scope {
+    /**
+     * `.mis` files are mission scripts - functions/objects/datablocks declared in one aren't
+     * meant to be reachable from anywhere else (each mission is self-contained), but code inside
+     * a `.mis` file can still freely call out to anything declared in ordinary `.cs`/`.tscript`
+     * files, same as normal. The shared base scope excludes every `.mis` document's exports
+     * entirely (cached once per reference type, reused by the common case - resolving from a
+     * non-`.mis` document); a `.mis` document additionally gets its own exports layered on top
+     * via `outerScope` chaining, visible only to references from that same document.
+     */
+    protected override getGlobalScope(referenceType: string, context: ReferenceInfo): Scope {
+        const baseScope = this.getNonMisGlobalScope(referenceType);
+        const currentDocUri = AstUtils.getDocument(context.container).uri;
+        if (!isMisDocumentUri(currentDocUri)) {
+            return baseScope;
+        }
+        return this.getMisOwnScope(referenceType, currentDocUri, baseScope);
+    }
+
+    private getNonMisGlobalScope(referenceType: string): Scope {
         return this.globalScopeCache.get(referenceType, () => new MultiMapScope(
-            this.indexManager.allElements(referenceType),
+            [...this.indexManager.allElements(referenceType)].filter(d => !isMisDocumentUri(d.documentUri)),
             undefined,
+            { caseInsensitive: true }
+        ));
+    }
+
+    private getMisOwnScope(referenceType: string, docUri: URI, outerScope: Scope): Scope {
+        const cacheKey = `${referenceType}::${docUri.toString()}`;
+        return this.misOwnScopeCache.get(cacheKey, () => new MultiMapScope(
+            [...this.indexManager.allElements(referenceType)].filter(d => d.documentUri.toString() === docUri.toString()),
+            outerScope,
             { caseInsensitive: true }
         ));
     }
