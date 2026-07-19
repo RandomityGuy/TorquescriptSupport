@@ -1,7 +1,7 @@
 {
     "name": "torquescript-support",
     "description": "Language support for TorqueScript (Torque 3D / Torque Game Engine): syntax highlighting, go to definition, find references, signature help, workspace/document symbols, hover, completion, and JSDoc-style type hints.",
-    "version": "0.0.3",
+    "version": "0.0.4",
     "displayName": "TorqueScript Support",
     "publisher": "RandomityGuy",
     "license": "MIT",
@@ -39,7 +39,16 @@
                 "extensions": [
                     ".cs",
                     ".tscript",
-                    ".gui",
+                    ".gui"
+                ],
+                "configuration": "./language-configuration.json"
+            },
+            {
+                "id": "torquescript-mission",
+                "aliases": [
+                    "TorqueScript Mission"
+                ],
+                "extensions": [
                     ".mis"
                 ],
                 "configuration": "./language-configuration.json"
@@ -48,6 +57,11 @@
         "grammars": [
             {
                 "language": "torquescript",
+                "scopeName": "source.torquescript",
+                "path": "syntaxes/torquescript.tmLanguage.json"
+            },
+            {
+                "language": "torquescript-mission",
                 "scopeName": "source.torquescript",
                 "path": "syntaxes/torquescript.tmLanguage.json"
             }

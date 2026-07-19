@@ -1,7 +1,7 @@
 {
     "name": "torquescript-workspace",
     "description": "Base workspace package",
-    "version": "0.0.3",
+    "version": "0.0.4",
     "type": "module",
     "private": true,
     "scripts": {
