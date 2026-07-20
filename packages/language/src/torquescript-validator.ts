@@ -34,7 +34,7 @@ export class TorquescriptValidator {
     /**
      * Method-call resolution is silent/assistive everywhere else (see
      * TorquescriptDocumentValidator, which suppresses the underlying linking error entirely) -
-     * except here: an explicit `/** @type ClassName *\/` override is the one unambiguous,
+     * except here: an explicit `/** @type {ClassName} *\/` override is the one unambiguous,
      * user-asserted type source, so if the method truly isn't found anywhere (static hierarchy,
      * namespace-function overrides, or the dynamic class/superClass overlay), that's worth flagging.
      */

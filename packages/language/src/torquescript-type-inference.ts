@@ -1,11 +1,11 @@
-import type { AstNode, IndexManager } from 'langium';
+import type { AstNode, IndexManager, LangiumDocuments } from 'langium';
 import { AstUtils, WorkspaceCache } from 'langium';
 import type { CommentProvider } from 'langium';
 import { getObjectBareword, unwrapExpr } from './torquescript-expr-utils.js';
 import type {
     ConsoleClassDecl, DatablockStmt, Expr, FnDecl, ObjectDecl, ObjectMember, VarExpr
 } from './generated/ast.js';
-import { isFnDecl, isObjectDecl, isSlotAssign, isStart, isVarExpr } from './generated/ast.js';
+import { isDatablockStmt, isFnDecl, isObjectDecl, isSlotAssign, isStart, isVarExpr } from './generated/ast.js';
 import type { TorquescriptServices } from './torquescript-module.js';
 
 export interface InferredType {
@@ -25,9 +25,12 @@ export interface InferredType {
     source: 'explicit' | 'inferred';
 }
 
-const TYPE_TAG_PATTERN = /@type\s+(\S+)/;
-const RETURNS_TAG_PATTERN = /@returns\s+(\S+)/;
-const PARAM_TAG_PATTERN = /@param\s+(\S+)\s+(\S+)/g;
+// Real JSDoc syntax: type goes in braces. @param's brace-typed form is `@param {Type} %name`
+// (type before name, matching actual JSDoc - our own earlier `@param %name Type` invention did
+// not).
+const TYPE_TAG_PATTERN = /@type\s+\{([^}]+)\}/;
+const RETURNS_TAG_PATTERN = /@returns\s+\{([^}]+)\}/;
+const PARAM_TAG_PATTERN = /@param\s+\{([^}]+)\}\s+(\S+)/g;
 const CLASSES_BY_NAME_KEY = 'classes-by-name';
 const NAMED_OBJECTS_BY_NAME_KEY = 'named-objects-by-name';
 
@@ -50,16 +53,21 @@ type NamedObjectNode = ObjectDecl | DatablockStmt;
 export class TorquescriptTypeInference {
 
     private readonly indexManager: IndexManager;
+    private readonly langiumDocuments: LangiumDocuments;
     private readonly commentProvider: CommentProvider;
     private readonly classesByNameCache: WorkspaceCache<string, Map<string, ConsoleClassDecl>>;
     private readonly namedObjectsByNameCache: WorkspaceCache<string, Map<string, NamedObjectNode>>;
+    /** class-name (lowercased) -> every superclass name ever co-declared with it - see getPseudoClassHierarchy. */
+    private readonly pseudoClassHierarchyCache: WorkspaceCache<string, Map<string, Set<string>>>;
     private readonly assignmentsByScope = new WeakMap<AstNode, Map<string, VarExpr[]>>();
 
     constructor(services: TorquescriptServices) {
         this.indexManager = services.shared.workspace.IndexManager;
+        this.langiumDocuments = services.shared.workspace.LangiumDocuments;
         this.commentProvider = services.documentation.CommentProvider;
         this.classesByNameCache = new WorkspaceCache(services.shared);
         this.namedObjectsByNameCache = new WorkspaceCache(services.shared);
+        this.pseudoClassHierarchyCache = new WorkspaceCache(services.shared);
     }
 
     inferType(expr: AstNode | undefined): InferredType | undefined {
@@ -118,8 +126,9 @@ export class TorquescriptTypeInference {
 
     private inferFromObjectDecl(decl: ObjectDecl): InferredType | undefined {
         const classDecl = decl.classname?.ref;
-        const extraNamespaces = this.classNameLinkingBypassed(classDecl) ? [] : this.getDynamicNamespaces(decl.members);
-        const usesScriptObjectConvention = extraNamespaces.length > 0;
+        const directNamespaces = this.classNameLinkingBypassed(classDecl) ? [] : this.getDynamicNamespaces(decl.members);
+        const usesScriptObjectConvention = directNamespaces.length > 0;
+        const extraNamespaces = this.expandNamespaceChain(directNamespaces);
         // Every `onAdd()` variant - regardless of whether it honors class=/superClass= - ends by
         // linking the object's own registered name in as the innermost namespace
         // (`Con::linkNamespaces(parent, name); mNameSpace = Con::lookupNamespace(name);`). That's
@@ -146,7 +155,8 @@ export class TorquescriptTypeInference {
      */
     private inferFromDatablock(decl: DatablockStmt): InferredType | undefined {
         const classDecl = decl.classname?.ref;
-        const extraNamespaces = this.getDynamicNamespacesFromSlots(decl.slots, { includeSuperClass: false });
+        const directNamespaces = this.getDynamicNamespacesFromSlots(decl.slots, { includeSuperClass: false });
+        const extraNamespaces = this.expandNamespaceChain(directNamespaces);
         // Same universal name-link as inferFromObjectDecl - GameBaseData::onAdd() also ends with
         // `Con::linkNamespaces(className, name); mNameSpace = Con::lookupNamespace(name);`, so a
         // datablock's own name works as a namespace too (`function MyDataName::method(){}`).
@@ -165,21 +175,98 @@ export class TorquescriptTypeInference {
         slots: Array<{ slot?: { $refText: string }, value: Expr }>,
         options: { includeSuperClass: boolean }
     ): string[] {
+        const { className, superClassName } = this.extractClassFields(slots);
         const names: string[] = [];
+        if (className) {
+            names.push(className);
+        }
+        if (options.includeSuperClass && superClassName) {
+            names.push(superClassName);
+        }
+        return names;
+    }
+
+    /**
+     * `$refText` (raw source text), not `.ref.name` - `class`/`superClass` (and their long-form
+     * aliases `className`/`superClassName` - real TorqueScript code uses both interchangeably,
+     * e.g. `class = "X";` vs `className = "X";`) are dynamic fields not statically declared on
+     * any class, so the reference itself never resolves (that's expected, see the `slot`
+     * linking-error suppression), but the text is always available regardless.
+     */
+    private extractClassFields(slots: Array<{ slot?: { $refText: string }, value: Expr }>): { className?: string; superClassName?: string } {
+        let className: string | undefined;
+        let superClassName: string | undefined;
         for (const slot of slots) {
-            // `$refText` (raw source text), not `.ref.name` - `class`/`superClass` are dynamic
-            // fields not statically declared on any class, so the reference itself never
-            // resolves (that's expected, see the `slot` linking-error suppression), but the text
-            // is always available regardless.
             const fieldName = slot.slot?.$refText?.toLowerCase();
-            if (fieldName === 'class' || (options.includeSuperClass && fieldName === 'superclass')) {
-                const literal = this.readStringLiteral(slot.value);
-                if (literal) {
-                    names.push(literal);
+            if (fieldName === 'class' || fieldName === 'classname') {
+                className = this.readStringLiteral(slot.value) ?? className;
+            } else if (fieldName === 'superclass' || fieldName === 'superclassname') {
+                superClassName = this.readStringLiteral(slot.value) ?? superClassName;
+            }
+        }
+        return { className, superClassName };
+    }
+
+    /**
+     * class-name (lowercased) -> every superclass name ever co-declared with it via
+     * `class=`/`superClass=` (or their long-form aliases) on ANY object or datablock in the
+     * workspace, named or anonymous. TorqueScript has no formal declaration syntax for these
+     * pseudo-classes - the only way to learn "OfflineMissionList's superclass is MissionList" is
+     * to find *some* declaration site that set both fields together, which could be anywhere,
+     * including an unnamed `new ScriptObject() {...}` - so this has to scan every document's full
+     * AST rather than relying on the (name-based) exported-symbol index, which only covers named
+     * objects/datablocks. Built once, cached, auto-invalidated on any document change.
+     */
+    private getPseudoClassHierarchy(): Map<string, Set<string>> {
+        return this.pseudoClassHierarchyCache.get('pseudo-class-hierarchy', () => {
+            const map = new Map<string, Set<string>>();
+            for (const document of this.langiumDocuments.all) {
+                for (const node of AstUtils.streamAllContents(document.parseResult.value)) {
+                    const slots = isObjectDecl(node) ? node.members.filter(isSlotAssign)
+                        : isDatablockStmt(node) ? node.slots
+                        : undefined;
+                    if (!slots) {
+                        continue;
+                    }
+                    const { className, superClassName } = this.extractClassFields(slots);
+                    if (!className || !superClassName) {
+                        continue;
+                    }
+                    const key = className.toLowerCase();
+                    const set = map.get(key);
+                    if (set) {
+                        set.add(superClassName);
+                    } else {
+                        map.set(key, new Set([superClassName]));
+                    }
+                }
+            }
+            return map;
+        });
+    }
+
+    /** Transitively expands a namespace list through the workspace-wide pseudo-class hierarchy (cycle-safe). */
+    private expandNamespaceChain(names: string[]): string[] {
+        if (names.length === 0) {
+            return names;
+        }
+        const hierarchy = this.getPseudoClassHierarchy();
+        const result = new Set<string>(names);
+        const queue = [...names];
+        while (queue.length > 0) {
+            const current = queue.pop()!;
+            const supers = hierarchy.get(current.toLowerCase());
+            if (!supers) {
+                continue;
+            }
+            for (const superName of supers) {
+                if (!result.has(superName)) {
+                    result.add(superName);
+                    queue.push(superName);
                 }
             }
         }
-        return names;
+        return [...result];
     }
 
     private readStringLiteral(expr: Expr | undefined): string | undefined {
@@ -266,8 +353,8 @@ export class TorquescriptTypeInference {
     /**
      * `%var` function parameters are plain strings on `FnDecl.params.var` - never a VarExpr with
      * a `.value`, so `findNearestAssignment` can never find anything for them (there's nothing to
-     * find: the value comes from the caller, not a local assignment). `@param %name ClassName` on
-     * the function's own doc comment is the only way to type them. Same confidence level as
+     * find: the value comes from the caller, not a local assignment). `@param {ClassName} %name`
+     * on the function's own doc comment is the only way to type them. Same confidence level as
      * `@type` (both are explicit user assertions), so this also participates in the
      * unresolved-method warning.
      */
@@ -281,8 +368,8 @@ export class TorquescriptTypeInference {
             return undefined;
         }
         for (const match of comment.matchAll(PARAM_TAG_PATTERN)) {
-            if (match[1] === varExpr.var) {
-                return { ...this.resolveTypeName(match[2]), source: 'explicit' };
+            if (match[2] === varExpr.var) {
+                return { ...this.resolveTypeName(match[1]), source: 'explicit' };
             }
         }
         return undefined;
@@ -296,16 +383,23 @@ export class TorquescriptTypeInference {
 
     /**
      * `@type`/`@param`/`@returns` may name a real engine class (from the console dump), a
-     * specific named object/datablock elsewhere in the project (e.g. `@type MPCoolEndGameDlg`
+     * specific named object/datablock elsewhere in the project (e.g. `@type {MPCoolEndGameDlg}`
      * naming a GUI dialog registered as `new GuiControl(MPCoolEndGameDlg) {...}` in a `.gui`
      * file), or a purely dynamic ScriptObject-convention namespace that only exists as a string
      * (`class = "MyNamespace";` plus `function MyNamespace::foo(){}` overrides, no backing
-     * declaration at all). Checked in that order: a real class always wins if the name happens to
-     * collide; otherwise, if a named object matches, its *actual* inferred type (real class
-     * hierarchy included, not just its own namespace) is what the annotation should mean - without
-     * this, `@type MPCoolEndGameDlg` would only ever check script-level `MPCoolEndGameDlg::...`
-     * overrides and completely miss built-in methods declared on the real class the dialog is an
-     * instance of. Falls back to a bare namespace name only when neither matches.
+     * declaration at all - e.g. `@returns {MissionList}` where every `MissionList`-classed object
+     * is an anonymous `new ScriptObject() { class = "..."; superClass = "MissionList"; }` with no
+     * registered name to look up). Checked in that order: a real class always wins if the name
+     * happens to collide; otherwise, if a named object matches, its *actual* inferred type (real
+     * class hierarchy included, not just its own namespace) is what the annotation should mean -
+     * without this, `@type {MPCoolEndGameDlg}` would only ever check script-level
+     * `MPCoolEndGameDlg::...` overrides and completely miss built-in methods declared on the real
+     * class the dialog is an instance of. The bare-namespace fallback assumes the ScriptObject
+     * convention too - it's the only mechanism that produces a pure virtual class name with no
+     * backing declaration at all in the first place, so a name that reaches this point is
+     * overwhelmingly likely to be one. Worst case if wrong (e.g. a datablock's `className=`
+     * pseudo-class, a different convention - see inferFromDatablock) is a few extra, inapplicable
+     * completion suggestions, never a false "not found" warning.
      */
     private resolveTypeName(name: string): { classDecl?: ConsoleClassDecl; extraNamespaces: string[]; usesScriptObjectConvention?: boolean } {
         const classDecl = this.findClassByName(name);
@@ -327,7 +421,7 @@ export class TorquescriptTypeInference {
                 };
             }
         }
-        return { extraNamespaces: [name] };
+        return { extraNamespaces: this.expandNamespaceChain([name]), usesScriptObjectConvention: true };
     }
 
     /** Public for the ScopeProvider's `ScriptObject` fallback - see getReceiverScope. */

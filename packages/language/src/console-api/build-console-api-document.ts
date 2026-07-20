@@ -12,6 +12,14 @@ import type { ParsedConsoleClass, ParsedConsoleFunction } from './parse-console-
 export const builtinFunctionSignatures = new WeakMap<FnDecl, string>();
 
 /**
+ * The `/*! ... *\/` doc-comment block the engine's dump places immediately above a built-in
+ * function/method, if any - captured by parse-console-dump.ts. Synthetic nodes have no CST, so
+ * there's nothing for Langium's own CommentProvider/DocumentationProvider to find; this is the
+ * hover provider's source of truth for built-in documentation instead.
+ */
+export const builtinDocumentation = new WeakMap<FnDecl | ConsoleMethodDecl, string>();
+
+/**
  * Builds an in-memory ConsoleApiModel AST from parsed console-dump data and wraps it as a real
  * LangiumDocument via `fromModel`, so its FnDecl/ConsoleClassDecl nodes become genuinely
  * resolvable cross-reference targets (indexed, linkable) exactly like nodes from a parsed file.
@@ -46,6 +54,9 @@ export function buildConsoleApiDocument(
             statements: []
         };
         builtinFunctionSignatures.set(fnNode, fn.signature);
+        if (fn.documentation) {
+            builtinDocumentation.set(fnNode, fn.documentation);
+        }
         return fnNode;
     });
 
@@ -64,14 +75,20 @@ export function buildConsoleApiDocument(
             classNode.parentClass = linker.buildReference(classNode, 'parentClass', undefined, cls.parentName) as Reference<ConsoleClassDecl>;
         }
 
-        classNode.methods = cls.methods.map((m, methodIndex): ConsoleMethodDecl => ({
-            $type: 'ConsoleMethodDecl',
-            $container: classNode,
-            $containerProperty: 'methods',
-            $containerIndex: methodIndex,
-            name: m.name,
-            signature: m.signature
-        }));
+        classNode.methods = cls.methods.map((m, methodIndex): ConsoleMethodDecl => {
+            const methodNode: ConsoleMethodDecl = {
+                $type: 'ConsoleMethodDecl',
+                $container: classNode,
+                $containerProperty: 'methods',
+                $containerIndex: methodIndex,
+                name: m.name,
+                signature: m.signature
+            };
+            if (m.documentation) {
+                builtinDocumentation.set(methodNode, m.documentation);
+            }
+            return methodNode;
+        });
 
         classNode.fields = cls.fields.map((f, fieldIndex): ConsoleFieldDecl => ({
             $type: 'ConsoleFieldDecl',

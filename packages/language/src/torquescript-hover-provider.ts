@@ -1,9 +1,9 @@
-import type { AstNode, LangiumDocument, MaybePromise } from 'langium';
+import type { AstNode, DocumentationProvider, LangiumDocument, MaybePromise } from 'langium';
 import { CstUtils } from 'langium';
 import { AstNodeHoverProvider } from 'langium/lsp';
 import type { Hover, HoverParams } from 'vscode-languageserver';
-import { builtinFunctionSignatures } from './console-api/build-console-api-document.js';
-import type { FnDecl } from './generated/ast.js';
+import { builtinDocumentation, builtinFunctionSignatures } from './console-api/build-console-api-document.js';
+import type { ConsoleMethodDecl, FnDecl } from './generated/ast.js';
 import type { Expr } from './generated/ast.js';
 import { isConsoleClassDecl, isConsoleFieldDecl, isConsoleMethodDecl, isFnDecl, isVarExpr } from './generated/ast.js';
 import { TorquescriptTypeInference } from './torquescript-type-inference.js';
@@ -33,10 +33,12 @@ export function renderFnDeclSignature(node: FnDecl, options?: { hideFirstParam?:
 export class TorquescriptHoverProvider extends AstNodeHoverProvider {
 
     private readonly typeInference: TorquescriptTypeInference;
+    private readonly documentationProvider: DocumentationProvider;
 
     constructor(services: TorquescriptServices) {
         super(services);
         this.typeInference = new TorquescriptTypeInference(services);
+        this.documentationProvider = services.documentation.DocumentationProvider;
     }
 
     /**
@@ -101,7 +103,15 @@ export class TorquescriptHoverProvider extends AstNodeHoverProvider {
 
     protected override getAstNodeHoverContent(node: AstNode): MaybePromise<string | undefined> {
         if (isFnDecl(node)) {
-            return `\`function ${renderFnDeclSignature(node)}\n\``;
+            const lines = [`\`function ${renderFnDeclSignature(node)}\n\``];
+            // User functions get their own `/** */` comment rendered as real JSDoc; built-ins have
+            // no CST for CommentProvider to look at, so they fall back to whatever doc-comment text
+            // was captured from the console dump (see builtinDocumentation's doc comment).
+            const documentation = this.documentationProvider.getDocumentation(node) ?? this.renderBuiltinDocumentation(node);
+            if (documentation) {
+                lines.push('', documentation);
+            }
+            return lines.join('\n');
         }
         if (isConsoleClassDecl(node)) {
             const lines: string[] = [];
@@ -121,8 +131,19 @@ export class TorquescriptHoverProvider extends AstNodeHoverProvider {
             return `\`\n${node.fieldType ? `${node.fieldType} ` : ''}${node.name}\n\``;
         }
         if (isConsoleMethodDecl(node)) {
-            return `\`\n${node.signature ?? node.name}\n\``;
+            const lines = [`\`\n${node.signature ?? node.name}\n\``];
+            const documentation = this.renderBuiltinDocumentation(node);
+            if (documentation) {
+                lines.push('', documentation);
+            }
+            return lines.join('\n');
         }
         return undefined;
+    }
+
+    /** Lightly formats the console dump's own doc-comment text (plain Doxygen-ish prose, not real JSDoc) - just bolds `@tag` lines so they read like the rest of the hover output. */
+    private renderBuiltinDocumentation(node: FnDecl | ConsoleMethodDecl): string | undefined {
+        const documentation = builtinDocumentation.get(node);
+        return documentation?.replace(/^@(\w+)/gm, '**@$1**');
     }
 }

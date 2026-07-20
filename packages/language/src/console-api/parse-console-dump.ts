@@ -8,11 +8,13 @@
 export interface ParsedConsoleFunction {
     name: string;
     signature: string;
+    documentation?: string;
 }
 
 export interface ParsedConsoleMethod {
     name: string;
     signature: string;
+    documentation?: string;
 }
 
 export interface ParsedConsoleField {
@@ -27,21 +29,47 @@ export interface ParsedConsoleClass {
     fields: ParsedConsoleField[];
 }
 
+/**
+ * Same length as the input (comment characters replaced with spaces, newlines preserved) so
+ * offsets keep lining up between the stripped and original text - needed to recover a method's
+ * original `/*! ... *\/` doc-comment text after using the stripped text to find safe match
+ * boundaries (class-body brace depth, field lines) without false-positives from comment content
+ * (e.g. a stray `{`/`}` or `;` mentioned in a description).
+ */
 function stripComments(text: string): string {
     return text
-        .replace(/\/\*[\s\S]*?\*\//g, ' ')
-        .replace(/\/\/[^\n\r]*/g, ' ');
+        .replace(/\/\*[\s\S]*?\*\//g, match => match.replace(/[^\n]/g, ' '))
+        .replace(/\/\/[^\n\r]*/g, match => match.replace(/[^\n]/g, ' '));
 }
 
-const METHOD_PATTERN = /virtual\s+[\w:*&<>]+\s+(\w+)\s*\(([^)]*)\)\s*\{\s*\}/g;
+// The doc-comment group is optional and must sit immediately before `virtual` (only whitespace
+// between) - real dumps document a function with a `/*! ... */` block directly above it, e.g.
+// `/*! @param channel_id ID of channel to fetch volume from. */\nvirtual int alxGetChannelVolume(int channel_id) {}`.
+const METHOD_PATTERN = /(?:\/\*!([\s\S]*?)\*\/\s*)?virtual\s+[\w:*&<>]+\s+(\w+)\s*\(([^)]*)\)\s*\{\s*\}/g;
+// No doc-capture group - used only to strip method declarations out of a class body before field
+// extraction, where the doc-comment text (if any) has already been blanked by stripComments.
+const METHOD_CODE_ONLY_PATTERN = /virtual\s+[\w:*&<>]+\s+\w+\s*\([^)]*\)\s*\{\s*\}/g;
+
+/** Strips `/*! *\/` delimiters, trims each line, drops Doxygen `@{`/`@}` grouping markers - `undefined` if nothing meaningful is left. */
+function cleanDocComment(raw: string | undefined): string | undefined {
+    if (!raw) {
+        return undefined;
+    }
+    const cleaned = raw
+        .split('\n')
+        .map(line => line.trim().replace(/^\*+\s?/, ''))
+        .join('\n')
+        .replace(/@\{|@\}/g, '')
+        .trim();
+    return cleaned.length > 0 ? cleaned : undefined;
+}
 
 export function parseConsoleFunctions(text: string): ParsedConsoleFunction[] {
-    const cleaned = stripComments(text);
     const functions: ParsedConsoleFunction[] = [];
-    for (const match of cleaned.matchAll(METHOD_PATTERN)) {
-        const name = match[1];
-        const params = match[2].trim();
-        functions.push({ name, signature: `${name}(${params})` });
+    for (const match of text.matchAll(METHOD_PATTERN)) {
+        const name = match[2];
+        const params = match[3].trim();
+        functions.push({ name, signature: `${name}(${params})`, documentation: cleanDocComment(match[1]) });
     }
     return functions;
 }
@@ -53,21 +81,21 @@ const CLASS_HEADER_PATTERN = /class\s+(\w+)\s*(?::\s*public\s+(\w+))?\s*\{/g;
 // only at the end still avoids matching mid-segment noise.
 const FIELD_LINE_PATTERN = /([A-Za-z_][\w:<>]*)\s+([A-Za-z_]\w*)$/;
 
-function findClassBody(text: string, openBraceIndex: number): { body: string; endIndex: number } {
+function findClassBody(cleanedText: string, openBraceIndex: number): { start: number; end: number; resumeIndex: number } {
     let depth = 1;
     let i = openBraceIndex + 1;
-    for (; i < text.length && depth > 0; i++) {
-        if (text[i] === '{') {
+    for (; i < cleanedText.length && depth > 0; i++) {
+        if (cleanedText[i] === '{') {
             depth++;
-        } else if (text[i] === '}') {
+        } else if (cleanedText[i] === '}') {
             depth--;
         }
     }
-    return { body: text.slice(openBraceIndex + 1, i - 1), endIndex: i };
+    return { start: openBraceIndex + 1, end: i - 1, resumeIndex: i };
 }
 
-function parseFields(body: string): ParsedConsoleField[] {
-    const withoutMethods = body.replace(METHOD_PATTERN, ' ');
+function parseFields(cleanedBody: string): ParsedConsoleField[] {
+    const withoutMethods = cleanedBody.replace(METHOD_CODE_ONLY_PATTERN, ' ');
     const fields: ParsedConsoleField[] = [];
     for (const rawStatement of withoutMethods.split(';')) {
         const statement = rawStatement.trim();
@@ -91,17 +119,22 @@ export function parseConsoleClasses(text: string): ParsedConsoleClass[] {
         const name = match[1];
         const parentName = match[2];
         const openBraceIndex = match.index + match[0].length - 1;
-        const { body, endIndex } = findClassBody(cleaned, openBraceIndex);
+        const { start, end, resumeIndex } = findClassBody(cleaned, openBraceIndex);
+
+        // Original (comments intact) for method-doc extraction; cleaned (comments blanked) for
+        // field extraction - both slices line up since stripComments preserves text length.
+        const originalBody = text.slice(start, end);
+        const cleanedBody = cleaned.slice(start, end);
 
         const methods: ParsedConsoleMethod[] = [];
-        for (const methodMatch of body.matchAll(METHOD_PATTERN)) {
-            const methodName = methodMatch[1];
-            const params = methodMatch[2].trim();
-            methods.push({ name: methodName, signature: `${methodName}(${params})` });
+        for (const methodMatch of originalBody.matchAll(METHOD_PATTERN)) {
+            const methodName = methodMatch[2];
+            const params = methodMatch[3].trim();
+            methods.push({ name: methodName, signature: `${methodName}(${params})`, documentation: cleanDocComment(methodMatch[1]) });
         }
 
-        classes.push({ name, parentName, methods, fields: parseFields(body) });
-        CLASS_HEADER_PATTERN.lastIndex = endIndex;
+        classes.push({ name, parentName, methods, fields: parseFields(cleanedBody) });
+        CLASS_HEADER_PATTERN.lastIndex = resumeIndex;
     }
     return classes;
 }

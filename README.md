@@ -43,17 +43,17 @@ None of this is a real type system - if it can't figure something out it just do
 Drop these in a `/** ... */` block comment right above the line in question (has to be `/** */`,
 `//` won't be picked up):
 
-**`@type ClassName`** above an assignment:
+**`@type {ClassName}`** above an assignment:
 ```
-/** @type SimObject */
+/** @type {SimObject} */
 %obj = getSomeGenericThing();
 ```
 
-**`@param %name ClassName`** above a function, one per parameter:
+**`@param {ClassName} %name`** above a function, one per parameter:
 ```
 /**
- * @param %obj SimObject
- * @param %amount Float
+ * @param {SimObject} %obj
+ * @param {Float} %amount
  */
 function damage(%obj, %amount)
 {
@@ -61,9 +61,9 @@ function damage(%obj, %amount)
 }
 ```
 
-**`@returns ClassName`** above a function, so callers get the type too:
+**`@returns {ClassName}`** above a function, so callers get the type too:
 ```
-/** @returns SimObject */
+/** @returns {SimObject} */
 function makeThing()
 {
     return new SimObject();
@@ -91,9 +91,9 @@ further you need `@returns` on the function being called.
 ## Quick-add JSDoc
 Cursor on a function or an assignment with no doc comment yet → open code actions (lightbulb /
 `Ctrl+.`):
-- **Add JSDoc for this function** - drops in a `@param`/`@returns` template.
-- **Add @type annotation** - drops in `@type`, already filled in with the right class name if the
-  extension can guess it.
+- **Add JSDoc for this function** - drops in a `@param {Type} %name`/`@returns {Type}` template.
+- **Add @type annotation** - drops in `@type {...}`, already filled in with the right class name if
+  the extension can guess it.
 
 ## Diagnostics
 Unresolved `.method()` calls stay quiet by default, it could just be a bad guess, or a gap in the

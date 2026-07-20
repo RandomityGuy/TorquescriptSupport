@@ -55,8 +55,9 @@ function insertAboveLine(document: LangiumDocument, offset: number, bodyLines: s
  * Offers two quick "add JSDoc" actions: a `@type` annotation on a `%var = ...;` assignment
  * (pre-filled with our own best-effort inferred type when we have one, a placeholder otherwise),
  * and a full `@param`/`@returns` template on a function declaration that doesn't have a doc
- * comment yet. These are the same custom `@type`/`@param`/`@returns` tags TorquescriptTypeInference
- * already reads - see that file for the annotation format and inference philosophy.
+ * comment yet. These are the same `@type {Type}`/`@param {Type} %name`/`@returns {Type}` tags
+ * (real JSDoc brace-typed syntax) TorquescriptTypeInference already reads - see that file for the
+ * annotation format and inference philosophy.
  */
 export class TorquescriptJsdocCodeActionProvider implements CodeActionProvider {
 
@@ -95,8 +96,8 @@ export class TorquescriptJsdocCodeActionProvider implements CodeActionProvider {
     }
 
     private buildFunctionJsdocAction(document: LangiumDocument, fnDecl: FnDecl): CodeAction {
-        const paramLines = (fnDecl.params?.var ?? []).map(name => `@param ${name} Type`);
-        const bodyLines = [...paramLines, '@returns Type'];
+        const paramLines = (fnDecl.params?.var ?? []).map(name => `@param {Type} ${name}`);
+        const bodyLines = [...paramLines, '@returns {Type}'];
         const offset = fnDecl.$cstNode?.offset ?? 0;
         return {
             title: 'Add JSDoc for this function',
@@ -114,11 +115,11 @@ export class TorquescriptJsdocCodeActionProvider implements CodeActionProvider {
         const typeName = inferred?.classDecl?.name ?? inferred?.extraNamespaces[0] ?? 'ClassName';
         const offset = assignment.$cstNode?.offset ?? 0;
         return {
-            title: inferred ? `Add @type ${typeName} annotation` : 'Add @type annotation',
+            title: inferred ? `Add @type {${typeName}} annotation` : 'Add @type annotation',
             kind: CodeActionKind.RefactorRewrite,
             edit: {
                 changes: {
-                    [document.textDocument.uri]: [insertAboveLine(document, offset, [`@type ${typeName}`])]
+                    [document.textDocument.uri]: [insertAboveLine(document, offset, [`@type {${typeName}}`])]
                 }
             }
         };
