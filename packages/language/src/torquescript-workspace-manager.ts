@@ -4,6 +4,7 @@ import type { LangiumSharedServices } from 'langium/lsp';
 import { watch, type FSWatcher } from 'node:fs';
 import { buildConsoleApiDocument } from './console-api/build-console-api-document.js';
 import { parseConsoleClasses, parseConsoleFunctions } from './console-api/parse-console-dump.js';
+import type { TorquescriptDocumentBuilder } from './torquescript-document-builder.js';
 import type { ConsoleApiModel } from './generated/ast.js';
 import type { TorquescriptServices } from './torquescript-module.js';
 
@@ -191,18 +192,19 @@ export class TorquescriptWorkspaceManager extends DefaultWorkspaceManager {
                 // editor), which this synthetic fromModel() document has none of. `build()` is the
                 // same mechanism the initial workspace load already uses successfully for it.
                 await this.documentBuilder.build([document], { validation: false });
-                // Separately trigger Langium's built-in sweep that relinks any document with an
-                // existing unresolved reference (it does this unconditionally, independent of
-                // what's passed here) so open files pick up the now-available functions/classes.
-                await this.documentBuilder.update([], []);
+                // Relink every document with an unresolved function/class reference so open files
+                // pick up the now-available built-ins. A plain `update([], [])` no longer does this
+                // (the builder's per-keystroke path is now export-diff-driven and would treat an
+                // empty change set as "nothing to relink" - see TorquescriptDocumentBuilder).
+                await (this.documentBuilder as TorquescriptDocumentBuilder).relinkAllUnresolved();
                 return;
             }
         }
 
-        // No config (or it no longer resolves to any functions/classes): if a synthetic document
-        // existed before, report it as deleted so dependent documents re-check their references.
+        // No config (or it no longer resolves to any functions/classes): the synthetic document
+        // (deleted above) took its symbols with it, so relink everything that depended on them.
         if (existed) {
-            await this.documentBuilder.update([], [documentUri]);
+            await (this.documentBuilder as TorquescriptDocumentBuilder).relinkAllUnresolved();
         }
     }
 }

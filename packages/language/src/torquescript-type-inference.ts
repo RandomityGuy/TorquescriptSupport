@@ -1,5 +1,5 @@
-import type { AstNode, IndexManager, LangiumDocuments } from 'langium';
-import { AstUtils, WorkspaceCache } from 'langium';
+import type { AstNode, IndexManager, LangiumDocument, LangiumDocuments } from 'langium';
+import { AstUtils, DocumentCache, WorkspaceCache } from 'langium';
 import type { CommentProvider } from 'langium';
 import { getObjectBareword, unwrapExpr } from './torquescript-expr-utils.js';
 import type {
@@ -59,6 +59,8 @@ export class TorquescriptTypeInference {
     private readonly namedObjectsByNameCache: WorkspaceCache<string, Map<string, NamedObjectNode>>;
     /** class-name (lowercased) -> every superclass name ever co-declared with it - see getPseudoClassHierarchy. */
     private readonly pseudoClassHierarchyCache: WorkspaceCache<string, Map<string, Set<string>>>;
+    /** Per-document extracted [className, superClassName] pairs - keyed by document so only an edited document re-scans, see getPseudoClassHierarchy. */
+    private readonly pseudoPairsByDocCache: DocumentCache<string, Array<[string, string]>>;
     private readonly assignmentsByScope = new WeakMap<AstNode, Map<string, VarExpr[]>>();
 
     constructor(services: TorquescriptServices) {
@@ -68,6 +70,7 @@ export class TorquescriptTypeInference {
         this.classesByNameCache = new WorkspaceCache(services.shared);
         this.namedObjectsByNameCache = new WorkspaceCache(services.shared);
         this.pseudoClassHierarchyCache = new WorkspaceCache(services.shared);
+        this.pseudoPairsByDocCache = new DocumentCache(services.shared);
     }
 
     inferType(expr: AstNode | undefined): InferredType | undefined {
@@ -213,25 +216,25 @@ export class TorquescriptTypeInference {
      * workspace, named or anonymous. TorqueScript has no formal declaration syntax for these
      * pseudo-classes - the only way to learn "OfflineMissionList's superclass is MissionList" is
      * to find *some* declaration site that set both fields together, which could be anywhere,
-     * including an unnamed `new ScriptObject() {...}` - so this has to scan every document's full
-     * AST rather than relying on the (name-based) exported-symbol index, which only covers named
-     * objects/datablocks. Built once, cached, auto-invalidated on any document change.
+     * including an unnamed `new ScriptObject() {...}` - so this genuinely needs each document's
+     * full AST (the name-based exported-symbol index only covers named objects/datablocks).
+     *
+     * Because the merged map lives in a WorkspaceCache (cleared on ANY document change, i.e. every
+     * keystroke while editing), a naive "scan every document's AST here" cost ~2.5s PER KEYSTROKE
+     * on a 367-file project - the dominant completion-latency source. The raw per-document
+     * `[className, superClassName]` extraction is therefore held in a DocumentCache (evicted only
+     * for the specific edited/deleted document), so rebuilding the merged map after a keystroke
+     * re-scans just the one changed file and reuses cached pairs for every other document; the
+     * merge itself only walks the tiny extracted pair lists, never the ASTs again.
      */
     private getPseudoClassHierarchy(): Map<string, Set<string>> {
         return this.pseudoClassHierarchyCache.get('pseudo-class-hierarchy', () => {
             const map = new Map<string, Set<string>>();
             for (const document of this.langiumDocuments.all) {
-                for (const node of AstUtils.streamAllContents(document.parseResult.value)) {
-                    const slots = isObjectDecl(node) ? node.members.filter(isSlotAssign)
-                        : isDatablockStmt(node) ? node.slots
-                        : undefined;
-                    if (!slots) {
-                        continue;
-                    }
-                    const { className, superClassName } = this.extractClassFields(slots);
-                    if (!className || !superClassName) {
-                        continue;
-                    }
+                const pairs = this.pseudoPairsByDocCache.get(
+                    document.uri, 'pseudo-pairs', () => this.extractPseudoClassPairs(document)
+                );
+                for (const [className, superClassName] of pairs) {
                     const key = className.toLowerCase();
                     const set = map.get(key);
                     if (set) {
@@ -243,6 +246,23 @@ export class TorquescriptTypeInference {
             }
             return map;
         });
+    }
+
+    private extractPseudoClassPairs(document: LangiumDocument): Array<[string, string]> {
+        const pairs: Array<[string, string]> = [];
+        for (const node of AstUtils.streamAllContents(document.parseResult.value)) {
+            const slots = isObjectDecl(node) ? node.members.filter(isSlotAssign)
+                : isDatablockStmt(node) ? node.slots
+                : undefined;
+            if (!slots) {
+                continue;
+            }
+            const { className, superClassName } = this.extractClassFields(slots);
+            if (className && superClassName) {
+                pairs.push([className, superClassName]);
+            }
+        }
+        return pairs;
     }
 
     /** Transitively expands a namespace list through the workspace-wide pseudo-class hierarchy (cycle-safe). */
