@@ -1,10 +1,10 @@
 import type { Cancellation, LangiumDocument, WorkspaceFolder } from 'langium';
 import { DefaultWorkspaceManager, DocumentState, URI, UriUtils } from 'langium';
 import type { LangiumSharedServices } from 'langium/lsp';
+import type { InitializeParams } from 'vscode-languageserver-protocol';
 import { watch, type FSWatcher } from 'node:fs';
 import { buildConsoleApiDocument } from './console-api/build-console-api-document.js';
 import { parseConsoleClasses, parseConsoleFunctions } from './console-api/parse-console-dump.js';
-import type { TorquescriptDocumentBuilder } from './torquescript-document-builder.js';
 import type { ConsoleApiModel } from './generated/ast.js';
 import type { TorquescriptServices } from './torquescript-module.js';
 
@@ -29,6 +29,21 @@ export class TorquescriptWorkspaceManager extends DefaultWorkspaceManager {
     constructor(services: LangiumSharedServices) {
         super(services);
         this.sharedServices = services;
+    }
+
+    /**
+     * Langium 4 only uses `workspaceFolders` during startup. Some clients, including older
+     * VS Code clients and lightweight LSP harnesses, send only `rootUri`; in that case the
+     * default manager silently starts with an empty workspace and therefore never indexes
+     * unopened sibling files. Treat the root URI as a workspace folder fallback.
+     */
+    override initialize(params: InitializeParams): void {
+        const workspaceFolders = params.workspaceFolders && params.workspaceFolders.length > 0
+            ? params.workspaceFolders
+            : params.rootUri
+                ? [{ uri: params.rootUri, name: 'workspace' }]
+                : undefined;
+        super.initialize({ ...params, workspaceFolders });
     }
 
     /**
@@ -192,11 +207,8 @@ export class TorquescriptWorkspaceManager extends DefaultWorkspaceManager {
                 // editor), which this synthetic fromModel() document has none of. `build()` is the
                 // same mechanism the initial workspace load already uses successfully for it.
                 await this.documentBuilder.build([document], { validation: false });
-                // Relink every document with an unresolved function/class reference so open files
-                // pick up the now-available built-ins. A plain `update([], [])` no longer does this
-                // (the builder's per-keystroke path is now export-diff-driven and would treat an
-                // empty change set as "nothing to relink" - see TorquescriptDocumentBuilder).
-                await (this.documentBuilder as TorquescriptDocumentBuilder).relinkAllUnresolved();
+                // Relink unresolved references so open files pick up the now-available built-ins.
+                await this.documentBuilder.update([], []);
                 return;
             }
         }
@@ -204,7 +216,7 @@ export class TorquescriptWorkspaceManager extends DefaultWorkspaceManager {
         // No config (or it no longer resolves to any functions/classes): the synthetic document
         // (deleted above) took its symbols with it, so relink everything that depended on them.
         if (existed) {
-            await (this.documentBuilder as TorquescriptDocumentBuilder).relinkAllUnresolved();
+            await this.documentBuilder.update([], [documentUri]);
         }
     }
 }

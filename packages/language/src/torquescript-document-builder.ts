@@ -47,6 +47,13 @@ function hasPotentiallyFixableError(document: LangiumDocument): boolean {
 export class TorquescriptDocumentBuilder extends DefaultDocumentBuilder {
 
     protected override shouldRelink(document: LangiumDocument, changedUris: Set<string>): boolean {
+        const hasPotentiallyFixableError = document.references.some(ref => {
+            const error = ref.error;
+            return error !== undefined && !ALWAYS_SILENT_PROPERTIES.has(error.info.property);
+        });
+        if (hasPotentiallyFixableError) {
+            return true;
+        }
         return this.indexManager.isAffected(document, changedUris);
     }
 
